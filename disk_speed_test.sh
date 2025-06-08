@@ -1,9 +1,5 @@
 #!/bin/bash
 
-# Mac硬盘速度测试脚本
-# 作者: Augment Agent
-# 用法: ./disk_speed_test.sh [硬盘路径] [文件大小]
-
 set -e
 
 # 颜色定义
