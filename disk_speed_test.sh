@@ -30,6 +30,85 @@ print_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
+# 显示进度条
+show_progress() {
+    local current=$1
+    local total=$2
+    local prefix=$3
+    local elapsed_time=$4
+    local bar_length=40
+
+    # 计算进度百分比
+    local percent=$((current * 100 / total))
+    local filled_length=$((current * bar_length / total))
+
+    # 构建进度条
+    local bar=""
+    for ((i=0; i<filled_length; i++)); do
+        bar+="█"
+    done
+    for ((i=filled_length; i<bar_length; i++)); do
+        bar+="░"
+    done
+
+    # 计算速度和剩余时间
+    local speed_info=""
+    if [ -n "$elapsed_time" ] && [ "$elapsed_time" != "0" ] && [ "$current" -gt 0 ]; then
+        local speed_mbps=$(echo "scale=1; $current / 1024 / 1024 / $elapsed_time" | bc 2>/dev/null || echo "0")
+        if [ "$percent" -gt 0 ] && [ "$percent" -lt 100 ]; then
+            local eta=$(echo "scale=1; $elapsed_time * (100 - $percent) / $percent" | bc 2>/dev/null || echo "0")
+            speed_info=" ${speed_mbps}MB/s ETA:${eta}s"
+        else
+            speed_info=" ${speed_mbps}MB/s"
+        fi
+    fi
+
+    # 显示进度条（使用\r回到行首，不换行）
+    printf "\r${BLUE}[INFO]${NC} %s [%s] %3d%%%s" "$prefix" "$bar" "$percent" "$speed_info"
+}
+
+# 获取文件大小（字节）
+get_file_size() {
+    local file=$1
+    if [ -f "$file" ]; then
+        stat -f%z "$file" 2>/dev/null || echo "0"
+    else
+        echo "0"
+    fi
+}
+
+# 模拟dd命令的进度显示
+dd_with_progress() {
+    local input_file=$1
+    local output_file=$2
+    local block_size=$3
+    local count=$4
+    local operation=$5  # "写入" 或 "读取"
+
+    # 启动dd命令在后台
+    dd if="$input_file" of="$output_file" bs="$block_size" count="$count" 2>/dev/null &
+    local dd_pid=$!
+
+    # 显示进度
+    local current=0
+    while kill -0 $dd_pid 2>/dev/null; do
+        show_progress $current $count "${operation}中"
+        sleep 0.1
+        current=$((current + count / 50))  # 模拟进度增长
+        if [ $current -gt $count ]; then
+            current=$count
+        fi
+    done
+
+    # 确保进度条显示100%
+    show_progress $count $count "${operation}中"
+    echo ""  # 换行
+
+    # 等待dd命令完成
+    wait $dd_pid
+    return $?
+}
+
 # 显示帮助信息
 show_help() {
     echo "Mac硬盘速度测试脚本"
@@ -194,9 +273,37 @@ test_write_speed() {
     # 清除系统缓存
     sudo purge 2>/dev/null || true
 
-    # 执行写入测试
+    # 执行写入测试并显示进度条
     local start_time=$(date +%s.%N)
-    dd if=/dev/zero of="$test_file" bs="$block_size" count="$count" conv=fsync 2>/dev/null
+
+    # 启动dd命令在后台
+    dd if=/dev/zero of="$test_file" bs="$block_size" count="$count" conv=fsync 2>/dev/null &
+    local dd_pid=$!
+
+    # 显示进度条
+    local target_size=$file_size
+    local current_size=0
+    local progress_start_time=$start_time
+
+    while kill -0 $dd_pid 2>/dev/null; do
+        current_size=$(get_file_size "$test_file")
+        if [ "$current_size" -gt "$target_size" ]; then
+            current_size=$target_size
+        fi
+        local current_time=$(date +%s.%N)
+        local elapsed=$(echo "$current_time - $progress_start_time" | bc)
+        show_progress $current_size $target_size "写入数据" "$elapsed" >&2
+        sleep 0.1
+    done
+
+    # 确保进度条显示100%
+    local final_time=$(date +%s.%N)
+    local final_elapsed=$(echo "$final_time - $progress_start_time" | bc)
+    show_progress $target_size $target_size "写入数据" "$final_elapsed" >&2
+    echo "" >&2  # 换行
+
+    # 等待dd命令完成
+    wait $dd_pid
     local end_time=$(date +%s.%N)
 
     local duration=$(echo "$end_time - $start_time" | bc)
@@ -209,6 +316,8 @@ test_write_speed() {
 test_read_speed() {
     local test_file=$1
     local file_size=$2
+    local block_size="1m"
+    local count=$((file_size / 1024 / 1024))
 
     # 将信息输出到stderr，避免影响函数返回值
     print_info "开始读取速度测试..." >&2
@@ -216,9 +325,39 @@ test_read_speed() {
     # 清除系统缓存
     sudo purge 2>/dev/null || true
 
-    # 执行读取测试
+    # 执行读取测试并显示进度条
     local start_time=$(date +%s.%N)
-    dd if="$test_file" of=/dev/null bs=1m 2>/dev/null
+
+    # 启动dd命令在后台
+    dd if="$test_file" of=/dev/null bs="$block_size" 2>/dev/null &
+    local dd_pid=$!
+
+    # 显示进度条 - 对于读取，我们模拟进度
+    local target_size=$file_size
+    local progress_steps=50
+    local step_size=$((target_size / progress_steps))
+    local current_size=0
+    local progress_start_time=$start_time
+
+    while kill -0 $dd_pid 2>/dev/null; do
+        local current_time=$(date +%s.%N)
+        local elapsed=$(echo "$current_time - $progress_start_time" | bc)
+        show_progress $current_size $target_size "读取数据" "$elapsed" >&2
+        sleep 0.1
+        current_size=$((current_size + step_size))
+        if [ "$current_size" -gt "$target_size" ]; then
+            current_size=$target_size
+        fi
+    done
+
+    # 确保进度条显示100%
+    local final_time=$(date +%s.%N)
+    local final_elapsed=$(echo "$final_time - $progress_start_time" | bc)
+    show_progress $target_size $target_size "读取数据" "$final_elapsed" >&2
+    echo "" >&2  # 换行
+
+    # 等待dd命令完成
+    wait $dd_pid
     local end_time=$(date +%s.%N)
 
     local duration=$(echo "$end_time - $start_time" | bc)
